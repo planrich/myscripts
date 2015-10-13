@@ -1,9 +1,0 @@
-#! /usr/bin/env fish
-
-set host 'metalmachine'
-
-rsync -azrve ssh $host:~/env/pypys ~/env
-
-cd ~/env/
-trash pypy-nightly
-tar xf pypys/pypy-newest-build.tar.bz2
