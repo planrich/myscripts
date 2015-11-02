@@ -31,32 +31,40 @@ def status():
             print "no process running"
 
 @click.command()
-@click.option('--branch', default='vecopt-merge')
+@click.option('--branch', default='default')
 @click.option('--debug/--no-debug', default=False)
-def build(branch, debug):
+@click.option('--force/--no-force', default=False)
+def build(branch, debug, force):
     with pypy_home():
         local_id = local("hg id -i", capture=True)
         run("hg pull")
         run("hg update %s --clean" % branch)
         remote_id = run("hg id -i")
-        if remote_id != local_id:
+        if remote_id != local_id and not force:
             print "remote has version %s != %s (local)!" % (remote_id, local_id)
         else:
-            print "building %s" % remote_id
+            print "building %s" % remote_id, 
             args = ""
             if debug:
                 args += ' --lldebug'
+                print "(debug mode)",
+            print
             run("tmux new-session -s pypy -c /home/rich/src/pypy -d 'pypy rpython/bin/rpython -Ojit %s pypy/goal/targetpypystandalone.py'" % args)
 
 @click.command()
-@click.option('--path', default='rpython/jit/backend')
-def s390x(path):
-    local_path = "/hom/rich/src/pypy-s390x/" + path
-    local("rsync -avz {local_path} s390x:pypy/{path}"
-          " --exclude='*.orig' --exclude='*~' --exclude='*.pyc'" \
-          .format(local_path=local_path, path=path))
-    with pypy_home():
-        run("py.test rpython/jit")
+@click.option('--path', default='')
+@click.option('--full/--no-full', default=False)
+def s390x(path, full):
+    local_path = "/home/rich/src/pypy/" + path
+    if full:
+        local("rsync -avz {local_path} s390x:src/pypy/{path}"
+              " --exclude='*.orig' --exclude='*~' --exclude='*.pyc'"
+              " --exclude='.hg/' --exclude='*.swp' --exclude='*.swo' --delete-excluded" \
+              .format(local_path=local_path, path=path))
+    else:
+        local("""inotifywait -r -m -e close_write --format '%w%f' ~/src/pypy | while read MODFILE;
+                   scp $MODFILE s390x:$MODFILE;
+                 end""")
 
 
 cli.add_command(s390x)

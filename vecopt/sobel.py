@@ -1,6 +1,7 @@
 import numpy
 import sys
-if sys.argv[-1] != 'python':
+
+if False and sys.argv[-1] != 'python':
     import scipy
     from scipy import ndimage
 
@@ -51,12 +52,12 @@ def correlate1d_3weigths(input, weights, axis):
         i = base
         while i < end:
             read_line(input, ibytes, i, axis, 1, 1, base, end)
-            j = 1
-            while j < count+1:
-                v = ibytes[j-1] * _a
-                v = v + ibytes[j] * _b
-                v = v + ibytes[j+1] * _c
-                obytes[j-1] = v
+            j = 0
+            while j < count:
+                v = ibytes[j] * _a
+                v = v + ibytes[j+1] * _b
+                v = v + ibytes[j+2] * _c
+                obytes[j] = v
                 del v
                 j += 1
             write_line(output, obytes, i, axis, 1, 1, base, end)
@@ -68,18 +69,20 @@ def correlate1d_3weigths(input, weights, axis):
 def sobel_py(im, axis):
     im = correlate1d_3weigths(im, [-1,0,1], axis)
     return im
-    for i in range(3):
-        if i != axis:
-            im = correlate1d_3weigths(im, [1,2,1], i)
-    return im
+    #for i in range(3):
+    #    if i != axis:
+    #        im = correlate1d_3weigths(im, [1,2,1], i)
+    #return im
 def sobel_scipy(im, axis):
-    #return ndimage.sobel(im, axis)
+    return ndimage.sobel(im, axis)
+    import scipy
+    from scipy import ndimage
     im = ndimage.correlate1d(im, [-1,0,1], axis)
     return im
-    for i in range(3):
-        if i != axis:
-            im = ndimage.correlate1d(im, [1,2,1], i)
-    return im
+    #for i in range(3):
+    #    if i != axis:
+    #        im = ndimage.correlate1d(im, [1,2,1], i)
+    #return im
 
 # numpy.hypot not impl in pypy
 def hypot(dx, dy):
@@ -95,42 +98,39 @@ def equal(expected, actual):
     for i in range(expected.size):
         assert e[i] == a[i], "do not match at pos %d, %s != %s" % (i,e[i],a[i])
 
-import imageio
-filename = sys.argv[1]
-im = imageio.imread(filename)
-im = im.astype('int32')
-arg = sys.argv[-1]
-if arg == 'python':
-    i = 0
+def sobel(im, out):
+    #im = im.astype('int32')
     dx = sobel_py(im, 0)
     dy = sobel_py(im, 1)
     mag = hypot(dx, dy)  # magnitude
-    mag *= 255.0 / numpy.max(mag)  # normalize (Q&D)
-elif arg == 'test':
-    input = numpy.array([0,0,0,0,1,1,1,1,2,2,2,2,3,3,3,3,4,4,4,4,500,500,500,500],'int32').reshape((2,3,4))
-    print "input\n", input
-    print "=" * 20
-    act = sobel_py(input, 1)
-    exp = sobel_scipy(input, 1)
-    print exp, "==\n", act
-    equal(exp,act)
-    print "-" * 10
-    act = sobel_py(input, 0)
-    exp = sobel_scipy(input, 0)
-    print exp, "==\n", act
-    equal(exp,act)
-    print "-" * 10
-    act = sobel_py(input, 2)
-    exp = sobel_scipy(input, 2)
-    print exp, "==\n", act
-    equal(exp,act)
-    sys.exit(0)
-else:
-    import scipy
-    sobel = sobel_scipy
+    numpy.multiply(mag, 255.0 / numpy.max(mag), out=out)  # normalize (Q&D)
+    return out 
+
+def sobel_python(im, out):
     dx = sobel_scipy(im, 0)
     dy = sobel_scipy(im, 1)
     mag = hypot(dx, dy)      # magnitude
-    mag *= 255.0 / numpy.max(mag)  # normalize (Q&D)
+    max = numpy.max(mag)
+    numpy.multiply(mag, 255.0 / max, out=out)  # normalize (Q&D)
 
-imageio.imwrite('sobel-' + filename, mag)
+if __name__ == "__main__":
+    import imageio
+    filename = sys.argv[1]
+    im = imageio.imread(filename)
+    im = im.astype('int32')
+    arg = sys.argv[-1]
+    if arg == 'python':
+        i = 0
+        dx = sobel_py(im, 0)
+        dy = sobel_py(im, 1)
+        mag = hypot(dx, dy)  # magnitude
+        mag *= 255.0 / numpy.max(mag)  # normalize (Q&D)
+    else:
+        import scipy
+        sobel = sobel_scipy
+        dx = sobel_scipy(im, 0)
+        dy = sobel_scipy(im, 1)
+        mag = hypot(dx, dy)      # magnitude
+        mag *= 255.0 / numpy.max(mag)  # normalize (Q&D)
+
+    imageio.imwrite('sobel-' + filename, mag)
