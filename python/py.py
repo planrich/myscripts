@@ -1,10 +1,12 @@
-#! /usr/bin/env python
+#! /usr/bin/env python3.5
 
 from __future__ import with_statement
-from fabric.api import settings, run, local, env, cd
-import fabric
 import sys
 import click
+import os
+import pyinotify
+import asyncio
+import threading
 
 PYPY_HOME="/home/rich/src/pypy"
 
@@ -17,57 +19,104 @@ def pypy_home():
 @click.group()
 @click.option('--host', default='192.168.0.3')
 def cli(host):
-    env.host_string = host
-    env.hosts = [host]
+    pass
+    #env.host_string = host
+    #env.hosts = [host]
 
 @click.command()
 def status():
+    from fabric.api import settings, run, local, env, cd
     with pypy_home():
         took = run("""ps -o 'time,cmd' -a | grep 'pypystandalone.py' | cut -c1-9""").strip()
         took = took.replace("00:00:00","").strip()
         if took != "":
-            print "process running %s" % (took,)
+            print("process running %s" % (took,))
         else:
-            print "no process running"
+            print("no process running")
 
 @click.command()
 @click.option('--branch', default='default')
 @click.option('--debug/--no-debug', default=False)
 @click.option('--force/--no-force', default=False)
 def build(branch, debug, force):
+    from fabric.api import settings, run, local, env, cd
     with pypy_home():
         local_id = local("hg id -i", capture=True)
         run("hg pull")
         run("hg update %s --clean" % branch)
         remote_id = run("hg id -i")
         if remote_id != local_id and not force:
-            print "remote has version %s != %s (local)!" % (remote_id, local_id)
+            print("remote has version %s != %s (local)!" % (remote_id, local_id))
         else:
-            print "building %s" % remote_id, 
+            print("building %s" % remote_id,)
             args = ""
             if debug:
                 args += ' --lldebug'
-                print "(debug mode)",
-            print
+                print("(debug mode)",)
+            print()
             run("tmux new-session -s pypy -c /home/rich/src/pypy -d 'pypy rpython/bin/rpython -Ojit %s pypy/goal/targetpypystandalone.py'" % args)
 
+async def run_shell(cmd, retry_count=1):
+    while retry_count > 0:
+        subproc = await asyncio.create_subprocess_shell(cmd)
+        returncode = await subproc.wait()
+        if returncode == 0:
+            return
+        retry_count -= 1
+
+    print("ERROR: failed to complete %s" % cmd)
+
+def background_asyncio(loop):
+    try:
+        loop.run_forever()
+    finally:
+        loop.close()
+
 @click.command()
-@click.option('--path', default='')
-@click.option('--full/--no-full', default=False)
-def s390x(path, full):
-    local_path = "/home/rich/src/pypy/" + path
-    if full:
-        local("rsync -avz {local_path} s390x:src/pypy/{path}"
-              " --exclude='*.orig' --exclude='*~' --exclude='*.pyc'"
-              " --exclude='.hg/' --exclude='*.swp' --exclude='*.swo' --delete-excluded" \
-              .format(local_path=local_path, path=path))
-    else:
-        local("""inotifywait -r -m -e close_write --format '%w%f' ~/src/pypy | while read MODFILE;
-                   scp $MODFILE s390x:$MODFILE;
-                 end""")
+@click.option('--rpath', default='')
+@click.option('--exclude', default='*.swo,*.swp,*.pyc,*.o,.hg/,_cache/')
+@click.argument('hostname')
+def sync(rpath, hostname, exclude):
+    rsync_path = os.path.dirname(rpath)
+    excludes = exclude.split(",")
+    path = os.getcwd()
+    cmd = "rsync -avz {path} {hostname}:{rsync_path} "
+    cmd += ' '.join(['--exclude=\'%s\'' % (e,) for e in excludes])
 
+    # first sync
+    command = cmd.format(**locals())
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(run_shell(command))
 
-cli.add_command(s390x)
+    def sync_file(hostname, path, remote_path):
+        if os.path.exists(path):
+            print("starting run_shell", path, "to", remote_path)
+            loop = asyncio.get_event_loop()
+            loop.run_until_complete(run_shell("scp {path} {hostname}:{remote_path}".format(**locals()), retry_count=10))
+
+    threading.Thread(target=background_asyncio, args=(loop,))
+
+    class SyncHandler(pyinotify.ProcessEvent):
+        def __init__(self, hostname, remote_path):
+            self.hostname = hostname
+            self.remote_path = remote_path
+
+        def process_IN_CLOSE_WRITE(self, event):
+            remote_path = os.path.join(self.remote_path, os.path.relpath(event.pathname))
+            sync_file(self.hostname, event.pathname, remote_path)
+
+    # continous sync
+    wm = pyinotify.WatchManager()
+    wm.add_watch(path, pyinotify.ALL_EVENTS, rec=True)
+
+    # event handler
+    eh = SyncHandler(hostname, rpath)
+
+    # notifier
+    notifier = pyinotify.Notifier(wm, eh)
+    notifier.loop()
+
+cli.add_command(sync)
 cli.add_command(status)
 cli.add_command(build)
 

@@ -4,8 +4,12 @@ set branch (hg branch)
 switch $argv[1]
 case all
     set targets "own-linux-x86-64 pypy-c-jit-linux-x86-64"
+case owns390x
+    set targets "own-linux-s390x"
 case own
     set targets "own-linux-x86-64"
+case own32
+    set targets "own-linux-x86-32"
 case jit
     set targets "pypy-c-jit-linux-x86-64"
 case app

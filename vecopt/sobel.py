@@ -54,12 +54,25 @@ def correlate1d_3weigths(input, weights, axis):
             read_line(input, ibytes, i, axis, 1, 1, base, end)
             j = 0
             while j < count:
-                v = ibytes[j] * _a
-                v = v + ibytes[j+1] * _b
-                v = v + ibytes[j+2] * _c
-                obytes[j] = v
-                del v
-                j += 1
+                j1 = j+1
+                j2 = j+2
+                j3 = j+3
+                x = ibytes[j]
+                y = ibytes[j1]
+                z = ibytes[j2]
+                w = ibytes[j3]
+                x1 = x * _a
+                y1 = y * _b
+
+                z1 = z * _c
+                y2 = y * _a
+
+                z2 = z * _b
+                x2 = w * _c
+                obytes[j] = x1+y1+z1
+                obytes[j1] = x2+y2+z2
+                j += 2
+                del x,z,y,w,x1,y1,z1,x2,y2,z2
             write_line(output, obytes, i, axis, 1, 1, base, end)
             i += 1
         outer += 1
