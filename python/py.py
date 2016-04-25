@@ -7,14 +7,7 @@ import os
 import pyinotify
 import asyncio
 import threading
-
-PYPY_HOME="/home/rich/src/pypy"
-
-#fabric.state.output.stdout = False
-#fabric.state.output.running = False
-
-def pypy_home():
-    return cd(PYPY_HOME)
+import requests
 
 @click.group()
 @click.option('--host', default='192.168.0.3')
@@ -22,6 +15,23 @@ def cli(host):
     pass
     #env.host_string = host
     #env.hosts = [host]
+
+@click.command()
+@click.option('--branch', default=None)
+@click.option('--builder', default=None)
+def bbot(branch, builder):
+    assert branch is not None
+    assert builder is not None
+    args = {
+        "forcescheduler": "Force Scheduler",
+        "username": "plan_rich",
+        "reason": "force build",
+        "branch": branch
+    }
+    requests.post('http://buildbot.pypy.org/builders/{builder}/force'.format(builder=builder), data=args)
+    #    set url (echo $result | awk -F '[\']' '{gsub(/\.\.\//,"",$2); print $2}')
+    # print("success => http://buildbot.pypy.org/$url")
+
 
 @click.command()
 def status():
@@ -35,26 +45,38 @@ def status():
             print("no process running")
 
 @click.command()
-@click.option('--branch', default='default')
+@click.option('--branch', default='')
 @click.option('--debug/--no-debug', default=False)
 @click.option('--force/--no-force', default=False)
 def build(branch, debug, force):
-    from fabric.api import settings, run, local, env, cd
-    with pypy_home():
-        local_id = local("hg id -i", capture=True)
-        run("hg pull")
-        run("hg update %s --clean" % branch)
-        remote_id = run("hg id -i")
+    remote_id = run_remote_shell(hostname, "hg id -i")
+    if branch != "":
+        local_id = run_shell(hostname, "hg id -i")
+        run_remote_shell(hostname, "hg pull")
+        run_remote_shell(hostname, "hg update %s --clean" % branch)
         if remote_id != local_id and not force:
-            print("remote has version %s != %s (local)!" % (remote_id, local_id))
-        else:
-            print("building %s" % remote_id,)
-            args = ""
-            if debug:
-                args += ' --lldebug'
-                print("(debug mode)",)
-            print()
-            run("tmux new-session -s pypy -c /home/rich/src/pypy -d 'pypy rpython/bin/rpython -Ojit %s pypy/goal/targetpypystandalone.py'" % args)
+            print("ERROR: remote has version %s != %s (local)!" % (remote_id, local_id))
+            return
+
+    print("building %s" % remote_id,)
+    args = ""
+    if debug:
+        args += ' --lldebug'
+        print("(debug mode)",)
+    print()
+    cmd = "tmux new-session -s pypy -c /home/rich/src/pypy -d 'pypy rpython/bin/rpython -Ojit %s pypy/goal/targetpypystandalone.py'" % args
+    run_remote_shell(hostname, cmd)
+
+async def run_remote_shell(hostname, cmd, retry_count=1):
+    cmd = ("ssh {hostname} -c " + cmd).format(hostname=hostname)
+    while retry_count > 0:
+        subproc = await asyncio.create_subprocess_shell(cmd)
+        returncode = await subproc.wait()
+        if returncode == 0:
+            return
+        retry_count -= 1
+
+    print("ERROR: failed to complete %s" % cmd)
 
 async def run_shell(cmd, retry_count=1):
     while retry_count > 0:
@@ -119,6 +141,7 @@ def sync(rpath, hostname, exclude):
 cli.add_command(sync)
 cli.add_command(status)
 cli.add_command(build)
+cli.add_command(bbot)
 
 if __name__ == "__main__":
     cli()
