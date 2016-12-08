@@ -8,13 +8,11 @@ import pyinotify
 import asyncio
 import threading
 import requests
+import tempfile
 
 @click.group()
-@click.option('--host', default='192.168.0.3')
-def cli(host):
+def cli():
     pass
-    #env.host_string = host
-    #env.hosts = [host]
 
 @click.command()
 @click.option('--branch', default=None)
@@ -48,27 +46,51 @@ def status():
 @click.option('--branch', default='')
 @click.option('--debug/--no-debug', default=False)
 @click.option('--force/--no-force', default=False)
-def build(branch, debug, force):
-    remote_id = run_remote_shell(hostname, "hg id -i")
-    if branch != "":
-        local_id = run_shell(hostname, "hg id -i")
-        run_remote_shell(hostname, "hg pull")
-        run_remote_shell(hostname, "hg update %s --clean" % branch)
-        if remote_id != local_id and not force:
-            print("ERROR: remote has version %s != %s (local)!" % (remote_id, local_id))
-            return
+@click.option('--host', default='metal')
+def build(branch, debug, force, host):
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(run_remote_shell(host, "cd ~/src/pypy && hg pull"))
+    loop.run_until_complete(run_remote_shell(host, "cd ~/src/pypy && hg update %s --clean" % branch))
 
-    print("building %s" % remote_id,)
-    args = ""
+    print("building %s" % branch,)
+    options = ""
+    package_options = ""
     if debug:
-        args += ' --lldebug'
-        print("(debug mode)",)
-    print()
-    cmd = "tmux new-session -s pypy -c /home/rich/src/pypy -d 'pypy rpython/bin/rpython -Ojit %s pypy/goal/targetpypystandalone.py'" % args
-    run_remote_shell(hostname, cmd)
+        options = ' --lldebug'
+        package_options = "--nostrip"
+        print(" + (debug mode)")
+    shell_script = """
+BUILD_DIR=/home/rich/src/pypy
+cd $BUILD_DIR
+SCM_ID=$(hg id -i)
+pypy rpython/bin/rpython -Ojit {options} pypy/goal/targetpypystandalone.py'
+/usr/bin/python ./pypy/tool/release/package.py {package_options} --override_pypy_c ./pypy-c --targetdir ~/build
+cp ~/build/pypy-nightly.tar.bz2 ~/build/pypys/pypy-$SCM_ID.tar.bz2
+mv ~/build/pypy-nightly.tar.bz2 ~/build/pypys/pypy-latest.tar.bz2
+
+set list (ssh metalmachine "find /tmp -name 'testing_1' 2> /dev/null")
+set list (for elem in $list
+    echo $elem | perl -n -e '/(\d+)\/testing_1/ && print $1'
+end)
+set code "/tmp/usession-$branch-$list[1]"
+set debug_tar "$home/env/pypys/pypy-debug-$v.tar.bz2"
+set newdebug_tar "$home/env/pypys/pypy-debug-newest-build.tar.bz2"
+echo "creating $debug_tar from $code/debugcode"
+ssh metalmachine "cd $code; rm -rf debugcode ; cp -r testing_1/ debugcode/; tar czf $debug_tar debugcode/*.c"
+echo "copying $build -> $newbuild"
+ssh metalmachine "cp $build $newbuild"
+echo "copying $debug_tar -> $newdebug_tar"
+ssh metalmachine "cp $debug_tar $newdebug_tar"
+""".format(**locals())
+
+    cmd = "tmux new-session -s pypy -c /home/rich/src/pypy 'pypy rpython/bin/rpython -Ojit {options} pypy/goal/targetpypystandalone.py'".format(**locals())
+    loop.run_until_complete(run_remote_shell(host, cmd))
+    print("=> success")
 
 async def run_remote_shell(hostname, cmd, retry_count=1):
-    cmd = ("ssh {hostname} -c " + cmd).format(hostname=hostname)
+    cmd = '"' + cmd + '"'
+    cmd = ("ssh {hostname} " + cmd).format(hostname=hostname)
+    print("$", cmd)
     while retry_count > 0:
         subproc = await asyncio.create_subprocess_shell(cmd)
         returncode = await subproc.wait()
@@ -78,13 +100,17 @@ async def run_remote_shell(hostname, cmd, retry_count=1):
 
     print("ERROR: failed to complete %s" % cmd)
 
-async def run_shell(cmd, retry_count=1):
+async def run_shell(cmd, retry_count=1, directory=None):
+    curdir = os.getcwd()
+    if directory:
+        os.chdir(directory)
     while retry_count > 0:
         subproc = await asyncio.create_subprocess_shell(cmd)
         returncode = await subproc.wait()
         if returncode == 0:
             return
         retry_count -= 1
+    os.chdir(curdir)
 
     print("ERROR: failed to complete %s" % cmd)
 
@@ -96,7 +122,7 @@ def background_asyncio(loop):
 
 @click.command()
 @click.option('--rpath', default='')
-@click.option('--exclude', default='*.swo,*.swp,*.pyc,*.o,.hg/,_cache/')
+@click.option('--exclude', default='*.swo,*.swp,*.pyc,*.o,.hg/,_cache/,pypy-c,libpypy-c.so')
 @click.argument('hostname')
 def sync(rpath, hostname, exclude):
     rsync_path = os.path.dirname(rpath)
@@ -138,6 +164,39 @@ def sync(rpath, hostname, exclude):
     notifier = pyinotify.Notifier(wm, eh)
     notifier.loop()
 
+@click.command()
+@click.option('--path', default='.')
+@click.option('--branch', default='py3.5')
+@click.option('--osnarch', default='linux64')
+def py3here(path, branch, osnarch):
+    name = "pypy-nightly.tar.bz2"
+    name = "pypy-c-jit-latest-{arch}.tar.bz2".format(arch=osnarch)
+    tmpdir = tempfile.mkdtemp(suffix="pypy-script")
+    loop = asyncio.get_event_loop()
+    cmd = "wget http://buildbot.pypy.org/nightly/{branch}/{name}".format(
+                      path=path, branch=branch, arch=osnarch, name=name, tmpdir=tmpdir)
+    loop.run_until_complete(run_shell(cmd, directory=tmpdir))
+    cmd = "tar xf {name}".format(name=name)
+    loop.run_until_complete(run_shell(cmd, directory=tmpdir))
+
+    pypyname = None
+    for root, dirs, files in os.walk(tmpdir):
+        for dir in dirs:
+            if "pypy-c-jit" in dir:
+                pypyname = dir
+                break
+        else:
+            break
+
+    if pypyname is None:
+        raise ValueError("did not find pypy-c-jit-* directory to copy pypy-c and libpypy-c.so")
+
+    cmd = "cp {tmpdir}/{pypyname}/bin/pypy3 {path}/pypy-c".format(tmpdir=tmpdir, pypyname=pypyname, path=path)
+    loop.run_until_complete(run_shell(cmd))
+    cmd = "cp {tmpdir}/{pypyname}/bin/libpypy-c.so {path}".format(tmpdir=tmpdir, pypyname=pypyname, path=path)
+    loop.run_until_complete(run_shell(cmd))
+
+cli.add_command(py3here)
 cli.add_command(sync)
 cli.add_command(status)
 cli.add_command(build)
@@ -161,26 +220,6 @@ if __name__ == "__main__":
 #            echo "remote has older/other version than local $id != $lid"
 #        end
 #    case 'pkg'
-#        set v (ssh metalmachine "cd ~/src/pypy; hg id -i")
-#        echo "packaging version $v..."
-#        set newbuild "~/env/pypys/pypy-newest-build.tar.bz2"
-#        set build "~/env/pypys/pypy-$v.tar.bz2"
-#        ssh metalmachine "cd ~/src/pypy ; /usr/bin/python ./pypy/tool/release/package.py --nostrip --override_pypy_c ./pypy-c --targetdir ~/env/ --without-tk"
-#        ssh metalmachine "mv ~/env/pypy-nightly.tar.bz2 $build"
-#
-#        set list (ssh metalmachine "find /tmp -name 'testing_1' 2> /dev/null")
-#        set list (for elem in $list
-#            echo $elem | perl -n -e '/(\d+)\/testing_1/ && print $1'
-#        end)
-#        set code "/tmp/usession-$branch-$list[1]"
-#        set debug_tar "$home/env/pypys/pypy-debug-$v.tar.bz2"
-#        set newdebug_tar "$home/env/pypys/pypy-debug-newest-build.tar.bz2"
-#        echo "creating $debug_tar from $code/debugcode"
-#        ssh metalmachine "cd $code; rm -rf debugcode ; cp -r testing_1/ debugcode/; tar czf $debug_tar debugcode/*.c"
-#        echo "copying $build -> $newbuild"
-#        ssh metalmachine "cp $build $newbuild"
-#        echo "copying $debug_tar -> $newdebug_tar"
-#        ssh metalmachine "cp $debug_tar $newdebug_tar"
 #    case 'load'
 #        set host 'metalmachine'
 #        rsync -azrve ssh $host:~/env/pypys ~/env
